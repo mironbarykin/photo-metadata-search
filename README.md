@@ -61,10 +61,6 @@ Dependencies:
 PySide6
 piexif
 ```
-
----
-
-
 ---
 
 ## 🛠 Packaging as a Windows .exe
