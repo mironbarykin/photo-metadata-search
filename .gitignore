@@ -4,3 +4,4 @@ build/
 *.spec
 .env
 pics/
+dist/

@@ -68,9 +68,10 @@ You can create a Windows executable from the Python app using PyInstaller.
 
 Basic build (single-file, no console):
 ```bash
-pyinstaller --onefile --windowed --name photo-metadata-viewer app.py
+pyinstaller --onefile --windowed -i"icon.ico" --name photo-metadata-search app.py
 # --onefile  : produce a single .exe
 # --windowed : suppress console (useful for GUI apps)
+# --icon     : set the .exe icon (use .ico file)
 # --name     : output executable name
 ```
 
