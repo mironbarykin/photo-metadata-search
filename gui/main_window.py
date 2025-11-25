@@ -2,34 +2,53 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton, QLabel,
     QLineEdit, QCheckBox, QScrollArea, QGridLayout, QFrame
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QPixmap
 from .comment_editor import CommentEditor
 from core.file_scanner import scan_images
 from core.metadata import read_comment
+
+MIN_COLS = 2
+MAX_COLS = 6
+THUMB_SIZE = 128
+SPACING = 12
 
 class ImageGridItem(QFrame):
     def __init__(self, image_path, show_note, click_callback):
         super().__init__()
         self.image_path = image_path
         self.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(self)
-        pixmap = QPixmap(image_path)
-        thumb = QLabel()
-        thumb.setPixmap(pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        thumb.setAlignment(Qt.AlignCenter)
-        layout.addWidget(thumb)
-        name = QLabel(image_path.split("/")[-1])
-        name.setAlignment(Qt.AlignCenter)
-        layout.addWidget(name)
-        if show_note:
-            comment = read_comment(image_path)
-            note = QLabel(comment or "")
-            note.setWordWrap(True)
-            note.setAlignment(Qt.AlignCenter)
-            note.setStyleSheet("font-size: 11px; color: #555;")
-            layout.addWidget(note)
+        self.layout = QVBoxLayout(self)
+        self.thumb = QLabel()
+        self.name = QLabel(image_path.split("/")[-1])
+        self.note = QLabel()
+        self.setup_ui(show_note)
         self.mousePressEvent = lambda event: click_callback(self.image_path)
+
+    def setup_ui(self, show_note):
+        pixmap = QPixmap(self.image_path)
+        self.thumb.setPixmap(pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.thumb.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self.thumb)
+        self.name.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self.name)
+        if show_note:
+            comment = read_comment(self.image_path)
+            self.note.setText(comment or "")
+            self.note.setWordWrap(True)
+            self.note.setAlignment(Qt.AlignCenter)
+            self.note.setStyleSheet("font-size: 11px; color: #555;")
+            self.layout.addWidget(self.note)
+        else:
+            self.note.hide()
+
+    def refresh_note(self, show_note):
+        if show_note:
+            comment = read_comment(self.image_path)
+            self.note.setText(comment or "")
+            self.note.show()
+        else:
+            self.note.hide()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -42,7 +61,9 @@ class MainWindow(QMainWindow):
         self.layout = QHBoxLayout(self.central)
 
         # Left: Browser/search/notes
-        left_panel = QVBoxLayout()
+        left_panel_container = QWidget()
+        left_panel = QVBoxLayout(left_panel_container)
+
         # Folder selection
         folder_layout = QHBoxLayout()
         self.folder_label = QLabel("No folder selected")
@@ -67,17 +88,16 @@ class MainWindow(QMainWindow):
         # Image grid in scroll area
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(12)
+        self.grid_layout.setSpacing(SPACING)
         self.grid_layout.setAlignment(Qt.AlignTop)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setWidget(self.grid_widget)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_panel.addWidget(self.scroll)
 
-        # Add left panel to main layout
-        self.layout.addLayout(left_panel, 2)
+        self.layout.addWidget(left_panel_container, 2)  # Use addWidget instead of addLayout
 
-        # Right: Preview and comment editor
         right_panel = QVBoxLayout()
         self.preview_label = QLabel("Select an image")
         self.preview_label.setAlignment(Qt.AlignCenter)
@@ -94,6 +114,50 @@ class MainWindow(QMainWindow):
         self.filtered_images = []
         self.current_folder = None
         self.selected_image = None
+        self.grid_items = {}
+        self.loaded_count = 0
+        self.preloaded_count = 0
+        self.cols = 4
+        self.batch_size = 20 
+
+        self.scroll.verticalScrollBar().valueChanged.connect(self.on_scroll)
+        self.scroll.viewport().installEventFilter(self)
+        self.resizeEvent = self.on_resize
+
+    def eventFilter(self, obj, event):
+        # Listen for scroll viewport resize to update columns
+        if obj is self.scroll.viewport() and event.type() == QEvent.Resize:
+            self.update_columns()
+        return super().eventFilter(obj, event)
+
+    def on_resize(self, event):
+        self.update_columns()
+        event.accept()
+
+    def update_columns(self):
+        # Calculate columns based on scroll viewport width
+        width = self.scroll.viewport().width()
+        height = self.scroll.viewport().height()
+        col = max(MIN_COLS, min(MAX_COLS, width // (THUMB_SIZE + SPACING)))
+        if col != self.cols:
+            self.cols = col
+            self.relayout_grid()
+        self.grid_widget.setMinimumWidth(width)
+        self.grid_widget.setMaximumWidth(width)
+        row_height = THUMB_SIZE + SPACING
+        visible_rows = max(1, (height // row_height) + 2)
+        self.batch_size = self.cols * visible_rows
+
+    def relayout_grid(self):
+        for i in reversed(range(self.grid_layout.count())):
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget:
+                self.grid_layout.removeWidget(widget)
+        for idx, path in enumerate(self.filtered_images[:self.loaded_count]):
+            row, col = divmod(idx, self.cols)
+            item = self.grid_items.get(path)
+            if item:
+                self.grid_layout.addWidget(item, row, col)
 
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
@@ -101,6 +165,8 @@ class MainWindow(QMainWindow):
             self.current_folder = folder
             self.folder_label.setText(folder)
             self.images = scan_images(folder)
+            self.loaded_count = 0
+            self.preloaded_count = 0
             self.refresh_grid()
 
     def refresh_grid(self):
@@ -112,17 +178,48 @@ class MainWindow(QMainWindow):
             comment = read_comment(path)
             if not text or (comment and text in comment.lower()):
                 self.filtered_images.append(path)
-        # Clear grid
         for i in reversed(range(self.grid_layout.count())):
             widget = self.grid_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
-        # Add filtered images to grid
-        cols = 4
-        for idx, path in enumerate(self.filtered_images):
+        self.grid_items.clear()
+        self.loaded_count = 0
+        self.preloaded_count = 0
+        self.update_columns()
+        self.load_more_images()
+
+    def load_more_images(self, preload=False):
+        show_note = self.notes_toggle.isChecked()
+        cols = self.cols
+        total = len(self.filtered_images)
+        batch_size = self.batch_size
+        if preload:
+            # Only preload, don't add to grid, just cache thumbnails
+            start = self.preloaded_count
+            end = min(start + batch_size, total)
+            for idx, path in enumerate(self.filtered_images[start:end], start=start):
+                if path not in self.grid_items:
+                    # Preload pixmap (thumbnail)
+                    QPixmap(path).scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.preloaded_count = end
+            return
+
+        start = self.loaded_count
+        end = min(start + batch_size, total)
+        for idx, path in enumerate(self.filtered_images[start:end], start=start):
             row, col = divmod(idx, cols)
             item = ImageGridItem(path, show_note, self.on_image_selected)
             self.grid_layout.addWidget(item, row, col)
+            self.grid_items[path] = item
+        self.loaded_count = end
+        if self.loaded_count < total:
+            QTimer.singleShot(0, lambda: self.load_more_images(preload=True))
+
+    def on_scroll(self, value):
+        scroll_bar = self.scroll.verticalScrollBar()
+        if scroll_bar.maximum() - value < 200:
+            if self.loaded_count < len(self.filtered_images):
+                self.load_more_images()
 
     def on_image_selected(self, image_path):
         self.selected_image = image_path
@@ -135,6 +232,8 @@ class MainWindow(QMainWindow):
         self.comment_editor.load_comment(image_path)
 
     def on_comment_saved(self, image_path, comment):
-        # Refresh grid to update notes if visible
-        self.refresh_grid()
+        show_note = self.notes_toggle.isChecked()
+        item = self.grid_items.get(image_path)
+        if item:
+            item.refresh_note(show_note)
 
