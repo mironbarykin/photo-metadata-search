@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QTextEdit, QPushButton
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QTimer
 from core.metadata import read_comment, write_comment
 
 class CommentEditor(QWidget):
@@ -25,5 +25,12 @@ class CommentEditor(QWidget):
     def save_comment(self):
         if self.current_image:
             comment = self.text_edit.toPlainText()
-            write_comment(self.current_image, comment)
-            self.comment_saved.emit(self.current_image, comment)
+            self.save_btn.setEnabled(False)
+            self.save_btn.setText("Saving...")
+            QTimer.singleShot(100, lambda: self._do_save(comment))
+
+    def _do_save(self, comment):
+        write_comment(self.current_image, comment)
+        self.save_btn.setEnabled(True)
+        self.save_btn.setText("Save")
+        self.comment_saved.emit(self.current_image, comment)

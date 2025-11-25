@@ -1,6 +1,21 @@
 import piexif
 from PIL import Image, PngImagePlugin
 import os
+import logging
+
+ENABLE_METADATA_LOGGING = False
+
+logger = logging.getLogger("photo_metadata")
+if ENABLE_METADATA_LOGGING:
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler("send_this_to_miron.log", encoding="utf-8")
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    fh.setFormatter(formatter)
+    if not logger.hasHandlers():
+        logger.addHandler(fh)
+else:
+    logger.addHandler(logging.NullHandler())
+    logger.propagate = False
 
 def _is_jpeg_tiff(path):
     ext = os.path.splitext(path)[1].lower()
@@ -13,79 +28,71 @@ def _is_webp(path):
     return os.path.splitext(path)[1].lower() == ".webp"
 
 def read_comment(image_path):
-    if _is_jpeg_tiff(image_path):
-        try:
+    try:
+        if _is_jpeg_tiff(image_path):
             exif_dict = piexif.load(image_path)
-            # Try UserComment
             user_comment = exif_dict["Exif"].get(piexif.ExifIFD.UserComment)
             if user_comment:
-                try:
-                    # Remove encoding prefix if present
-                    if user_comment.startswith(b"ASCII\0\0\0"):
-                        user_comment = user_comment[8:]
-                    return user_comment.decode("utf-8", errors="replace").strip()
-                except Exception:
-                    return str(user_comment)
-            # Try ImageDescription
+                if user_comment.startswith(b"ASCII\0\0\0"):
+                    user_comment = user_comment[8:]
+                comment = user_comment.decode("utf-8", errors="replace").strip()
+                logger.info(f"Read UserComment from {image_path}: {comment}")
+                return comment
             img_desc = exif_dict["0th"].get(piexif.ImageIFD.ImageDescription)
             if img_desc:
-                return img_desc.decode("utf-8", errors="replace").strip()
-        except Exception:
-            pass
-    elif _is_png(image_path):
-        try:
+                comment = img_desc.decode("utf-8", errors="replace").strip()
+                logger.info(f"Read ImageDescription from {image_path}: {comment}")
+                return comment
+        elif _is_png(image_path):
             with Image.open(image_path) as im:
                 meta = im.info
-                # Standard PNG text fields
                 for key in ("Description", "Comment", "ImageDescription"):
                     if key in meta:
+                        logger.info(f"Read {key} from {image_path}: {meta[key]}")
                         return meta[key]
-        except Exception:
-            pass
-    elif _is_webp(image_path):
-        try:
+        elif _is_webp(image_path):
             with Image.open(image_path) as im:
                 meta = im.info
-                # WebP supports XMP as "description" or "Comment"
                 for key in ("description", "Comment", "ImageDescription"):
                     if key in meta:
+                        logger.info(f"Read {key} from {image_path}: {meta[key]}")
                         return meta[key]
-        except Exception:
-            pass
+    except Exception as e:
+        logger.error(f"Error reading metadata from {image_path}: {e}")
     return ""
 
 def write_comment(image_path, comment):
-    if _is_jpeg_tiff(image_path):
-        try:
+    try:
+        if _is_jpeg_tiff(image_path):
             exif_dict = piexif.load(image_path)
-            # Write UserComment (with ASCII prefix)
             user_comment = b"ASCII\0\0\0" + comment.encode("utf-8", errors="replace")
             exif_dict["Exif"][piexif.ExifIFD.UserComment] = user_comment
-            # Write ImageDescription
             exif_dict["0th"][piexif.ImageIFD.ImageDescription] = comment.encode("utf-8", errors="replace")
             exif_bytes = piexif.dump(exif_dict)
             piexif.insert(exif_bytes, image_path)
-        except Exception:
-            pass
-    elif _is_png(image_path):
-        try:
+            logger.info(f"Wrote UserComment and ImageDescription to {image_path}: {comment}")
+        elif _is_png(image_path):
             with Image.open(image_path) as im:
-                meta = im.info.copy()
+                meta = {}
+                for k, v in im.info.items():
+                    if isinstance(v, str):
+                        meta[k] = v
                 meta["Description"] = comment
                 meta["Comment"] = comment
                 pnginfo = PngImagePlugin.PngInfo()
                 for k, v in meta.items():
                     pnginfo.add_text(k, v)
                 im.save(image_path, pnginfo=pnginfo)
-        except Exception:
-            pass
-    elif _is_webp(image_path):
-        try:
+                logger.info(f"Wrote Description/Comment to PNG {image_path}: {comment}")
+        elif _is_webp(image_path):
             with Image.open(image_path) as im:
-                meta = im.info.copy()
+                meta = {}
+                for k, v in im.info.items():
+                    if isinstance(v, str):
+                        meta[k] = v
                 meta["description"] = comment
                 meta["Comment"] = comment
                 im.save(image_path, "WEBP", **meta)
-        except Exception:
-            pass
-
+                logger.info(f"Wrote description/Comment to WEBP {image_path}: {comment}")
+    except Exception as e:
+        logger.error(f"Error writing metadata to {image_path}: {e}")
