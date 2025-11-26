@@ -42,14 +42,13 @@ class ImageGridItem(QFrame):
         else:
             self.note.hide()
 
-    def refresh_note(self, show_note):
+    def refresh_note(self, show_note, comment = None):
         if show_note:
-            comment = read_comment(self.image_path)
-            self.note.setText(comment or "")
-            self.note.show()
+            if comment is not None:
+                self.note.setText(comment)
+            self.note.setHidden(False)
         else:
             self.note.hide()
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -80,7 +79,7 @@ class MainWindow(QMainWindow):
         self.search_box.textChanged.connect(self.refresh_grid)
         self.notes_toggle = QCheckBox("Show notes")
         self.notes_toggle.setChecked(True)
-        self.notes_toggle.stateChanged.connect(self.refresh_grid)
+        self.notes_toggle.stateChanged.connect(self.on_notes_toggle)
         search_toggle_layout.addWidget(self.search_box)
         search_toggle_layout.addWidget(self.notes_toggle)
         left_panel.addLayout(search_toggle_layout)
@@ -96,7 +95,7 @@ class MainWindow(QMainWindow):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_panel.addWidget(self.scroll)
 
-        self.layout.addWidget(left_panel_container, 2)  # Use addWidget instead of addLayout
+        self.layout.addWidget(left_panel_container, 2)
 
         right_panel = QVBoxLayout()
         self.preview_label = QLabel("Select an image")
@@ -169,8 +168,13 @@ class MainWindow(QMainWindow):
             self.preloaded_count = 0
             self.refresh_grid()
 
+    def on_notes_toggle(self, state):
+        show_note = self.notes_toggle.isChecked()
+
+        for item in self.grid_items.values():
+            item.refresh_note(show_note)
+
     def refresh_grid(self):
-        # Filter images by search
         text = self.search_box.text().strip().lower()
         show_note = self.notes_toggle.isChecked()
         self.filtered_images = []
@@ -235,5 +239,5 @@ class MainWindow(QMainWindow):
         show_note = self.notes_toggle.isChecked()
         item = self.grid_items.get(image_path)
         if item:
-            item.refresh_note(show_note)
+            item.refresh_note(show_note, comment)
 
