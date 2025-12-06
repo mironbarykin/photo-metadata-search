@@ -1,3 +1,4 @@
+import logging
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton, QLabel,
     QLineEdit, QCheckBox, QScrollArea, QGridLayout, QFrame
@@ -8,14 +9,30 @@ from .comment_editor import CommentEditor
 from core.file_scanner import scan_images
 from core.metadata import read_comment
 
+ENABLE_UI_LOGGING = False
+
+logger = logging.getLogger("photo_search.gui")
+if ENABLE_UI_LOGGING:
+    logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler("send_this_to_miron_ui.log", encoding="utf-8")
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    fh.setFormatter(formatter)
+    if not logger.hasHandlers():
+        logger.addHandler(fh)
+else:
+    logger.addHandler(logging.NullHandler())
+    logger.propagate = False
+
+
 MIN_COLS = 2
 MAX_COLS = 6
 THUMB_SIZE = 128
 SPACING = 12
 
 class ImageGridItem(QFrame):
-    def __init__(self, image_path, show_note, click_callback):
-        super().__init__()
+    def __init__(self, image_path, show_note, click_callback, parent=None):
+        super().__init__(parent)
+        logger.debug(f"Creating ImageGridItem for {image_path}, show_note={show_note}")
         self.image_path = image_path
         self.setFrameShape(QFrame.StyledPanel)
         self.layout = QVBoxLayout(self)
@@ -42,16 +59,17 @@ class ImageGridItem(QFrame):
         else:
             self.note.hide()
 
-    def refresh_note(self, show_note, comment = None):
+    def refresh_note(self, show_note):
         if show_note:
-            if comment is not None:
-                self.note.setText(comment)
+            comment = read_comment(self.image_path)
+            self.note.setText(comment or "")
             self.note.setHidden(False)
         else:
-            self.note.hide()
+            self.note.setHidden(True)
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        logger.debug("MainWindow initialized")
         self.setWindowTitle("Photo Metadata Viewer & Searcher")
         self.resize(1200, 700)
 
@@ -124,7 +142,8 @@ class MainWindow(QMainWindow):
         self.resizeEvent = self.on_resize
 
     def eventFilter(self, obj, event):
-        # Listen for scroll viewport resize to update columns
+        logger.debug(f"eventFilter: obj={obj}, event={event.type()}")
+
         if obj is self.scroll.viewport() and event.type() == QEvent.Resize:
             self.update_columns()
         return super().eventFilter(obj, event)
@@ -134,7 +153,8 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def update_columns(self):
-        # Calculate columns based on scroll viewport width
+        logger.debug("Updating columns")
+
         width = self.scroll.viewport().width()
         height = self.scroll.viewport().height()
         col = max(MIN_COLS, min(MAX_COLS, width // (THUMB_SIZE + SPACING)))
@@ -147,11 +167,8 @@ class MainWindow(QMainWindow):
         visible_rows = max(1, (height // row_height) + 2)
         self.batch_size = self.cols * visible_rows
 
+
     def relayout_grid(self):
-        for i in reversed(range(self.grid_layout.count())):
-            widget = self.grid_layout.itemAt(i).widget()
-            if widget:
-                self.grid_layout.removeWidget(widget)
         for idx, path in enumerate(self.filtered_images[:self.loaded_count]):
             row, col = divmod(idx, self.cols)
             item = self.grid_items.get(path)
@@ -169,23 +186,24 @@ class MainWindow(QMainWindow):
             self.refresh_grid()
 
     def on_notes_toggle(self, state):
-        show_note = self.notes_toggle.isChecked()
-
-        for item in self.grid_items.values():
-            item.refresh_note(show_note)
+        logger.debug(f"Notes toggle: {state}. Refreshing grid.")
+        self.refresh_grid()
 
     def refresh_grid(self):
         text = self.search_box.text().strip().lower()
         show_note = self.notes_toggle.isChecked()
+        logger.debug(f"Refreshing grid. Search text: '{text}' show_note state: {show_note}")
         self.filtered_images = []
         for path in self.images:
             comment = read_comment(path)
             if not text or (comment and text in comment.lower()):
                 self.filtered_images.append(path)
+        # Properly delete widgets to prevent them from becoming windows
         for i in reversed(range(self.grid_layout.count())):
             widget = self.grid_layout.itemAt(i).widget()
             if widget:
-                widget.setParent(None)
+                self.grid_layout.removeWidget(widget)
+                widget.deleteLater()  # <-- Only this, do NOT call setParent(None)
         self.grid_items.clear()
         self.loaded_count = 0
         self.preloaded_count = 0
@@ -193,17 +211,16 @@ class MainWindow(QMainWindow):
         self.load_more_images()
 
     def load_more_images(self, preload=False):
+        logger.debug(f"Loading more images, preload={preload}")
         show_note = self.notes_toggle.isChecked()
         cols = self.cols
         total = len(self.filtered_images)
         batch_size = self.batch_size
         if preload:
-            # Only preload, don't add to grid, just cache thumbnails
             start = self.preloaded_count
             end = min(start + batch_size, total)
             for idx, path in enumerate(self.filtered_images[start:end], start=start):
                 if path not in self.grid_items:
-                    # Preload pixmap (thumbnail)
                     QPixmap(path).scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.preloaded_count = end
             return
@@ -212,7 +229,7 @@ class MainWindow(QMainWindow):
         end = min(start + batch_size, total)
         for idx, path in enumerate(self.filtered_images[start:end], start=start):
             row, col = divmod(idx, cols)
-            item = ImageGridItem(path, show_note, self.on_image_selected)
+            item = ImageGridItem(path, show_note, self.on_image_selected, parent=self.grid_widget)
             self.grid_layout.addWidget(item, row, col)
             self.grid_items[path] = item
         self.loaded_count = end
@@ -220,12 +237,14 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.load_more_images(preload=True))
 
     def on_scroll(self, value):
+        logger.debug(f"Scroll value changed: {value}")
         scroll_bar = self.scroll.verticalScrollBar()
         if scroll_bar.maximum() - value < 200:
             if self.loaded_count < len(self.filtered_images):
                 self.load_more_images()
 
     def on_image_selected(self, image_path):
+        logger.debug(f"Image selected: {image_path}")
         self.selected_image = image_path
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
@@ -236,8 +255,9 @@ class MainWindow(QMainWindow):
         self.comment_editor.load_comment(image_path)
 
     def on_comment_saved(self, image_path, comment):
+        logger.debug(f"Comment saved for {image_path}: {comment}")
         show_note = self.notes_toggle.isChecked()
         item = self.grid_items.get(image_path)
         if item:
-            item.refresh_note(show_note, comment)
+            item.refresh_note(show_note)
 

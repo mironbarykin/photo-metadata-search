@@ -8,7 +8,7 @@ ENABLE_METADATA_LOGGING = False
 logger = logging.getLogger("photo_metadata")
 if ENABLE_METADATA_LOGGING:
     logger.setLevel(logging.INFO)
-    fh = logging.FileHandler("send_this_to_miron.log", encoding="utf-8")
+    fh = logging.FileHandler("send_this_to_miron_metadata.log", encoding="utf-8")
     formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
     fh.setFormatter(formatter)
     if not logger.hasHandlers():
