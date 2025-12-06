@@ -1,4 +1,4 @@
-# Photo Metadata Viewer & Searcher
+# Photo Metadata (Editor) & Searcher
 
 ## 📌 Overview
 This application lets you:
@@ -23,6 +23,8 @@ The goal is to provide a simple desktop tool to organize photos using textual no
 ## 🏗 Technology Stack
 - **Python 3.10+**
 - **PySide6 / PyQt6** for GUI
+- **piexif** for EXIF metadata
+- **Pillow** for image handling
 - **exiftool** for metadata reading/writing
 
 ---
@@ -34,17 +36,12 @@ photo-metadata-app/
 ├── app.py                # Application entry point
 ├── gui/
 │   ├── main_window.py    # Main UI
-│   ├── image_viewer.py   # Component to display selected image
-│   ├── comment_editor.py # Field to view/change metadata comment
-│   └── search_panel.py   # Search input & results
+│   └── comment_editor.py # Field to view/change metadata comment
 │
 ├── core/
 │   ├── metadata.py       # Functions to read/write EXIF/XMP
 │   ├── file_scanner.py   # Finds images in folder
 │   └── search.py         # Implements metadata search
-│
-├── assets/
-│   └── icons/            # UI icons
 │
 ├── requirements.txt      # Dependencies
 └── README.md             # Documentation
@@ -60,7 +57,14 @@ Dependencies:
 ```
 PySide6
 piexif
+pillow
+exiftool (system dependency, install separately)
 ```
+To install `exiftool`:
+- **Windows**: Download from [exiftool.org](https://exiftool.org/)
+- **macOS**: `brew install exiftool`
+- **Linux**: Use your package manager, e.g. `sudo apt install libimage-exiftool-perl`
+
 ---
 
 ## 🛠 Packaging as a Windows .exe
@@ -69,11 +73,18 @@ You can create a Windows executable from the Python app using PyInstaller.
 Basic build (single-file, no console):
 ```bash
 pyinstaller --onefile --windowed -i"icon.ico" --name photo-metadata-search app.py
-# --onefile  : produce a single .exe
-# --windowed : suppress console (useful for GUI apps)
-# --icon     : set the .exe icon (use .ico file)
-# --name     : output executable name
 ```
+
+---
+
+## 🛠 Packaging for macOS
+You can create a MacOS (Unix) executable from the Python app using PyInstaller.
+
+```bash
+pyinstaller --onefile --windowed -i"icon.icns" --name photo-metadata-search app.py
+```
+
+---
 
 ## 🧩 How It Works
 ### Reading metadata:
@@ -93,11 +104,9 @@ pyinstaller --onefile --windowed -i"icon.ico" --name photo-metadata-search app.p
 ---
 
 ## 📌 Future Improvements
-- Thumbnail preview grid
 - SQLite index for faster search
 - Drag & drop folder selection
 - Tag support (multi-field metadata)
-- Dark theme
 
 ---
 

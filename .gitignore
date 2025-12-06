@@ -6,3 +6,5 @@ build/
 pics/
 dist/
 *.log
+venv/
+.DS_Store
