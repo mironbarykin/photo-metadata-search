@@ -3,14 +3,18 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton, QLabel,
     QLineEdit, QCheckBox, QScrollArea, QGridLayout, QFrame
 )
-from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QPixmap, QGuiApplication
+from PySide6.QtCore import (
+    Qt, QEvent, QTimer, QObject, Signal, QRunnable, Slot, QSize, QThreadPool
+)
+from PySide6.QtGui import QPixmap, QGuiApplication, QImageReader, QImage
 from .comment_editor import CommentEditor
 from core.file_scanner import scan_images
 from core.metadata import read_comment
 import os
 import platform
 import subprocess
+import hashlib
+import pathlib
 
 ENABLE_UI_LOGGING = False
 
@@ -48,7 +52,45 @@ def open_in_explorer(path):
         subprocess.run(["xdg-open", folder])
 
 
+class ThumbnailSignals(QObject):
+    finished = Signal(str, QPixmap)  # path, pixmap
 
+
+class ThumbnailWorker(QRunnable):
+    """
+    QRunnable that reads and scales an image using QImageReader (decode at scaled size).
+    Emits finished(path, pixmap) on completion.
+    """
+
+    def __init__(self, path: str, size: int, disk_cache_path: str = None):
+        super().__init__()
+        self.path = path
+        self.size = size
+        self.signals = ThumbnailSignals()
+        self.disk_cache_path = disk_cache_path
+
+    @Slot()
+    def run(self):
+        try:
+            # Attempt to use QImageReader scaled decode
+            reader = QImageReader(self.path)
+            # request integer scaled size preserving aspect ratio by setting max dimension
+            # We set scaled size with equal width/height - QImageReader will preserve aspect ratio
+            reader.setAutoTransform(True)
+            reader.setScaledSize(QSize(self.size, self.size))
+            image = reader.read()
+            if image and not image.isNull():
+                pix = QPixmap.fromImage(image)
+            else:
+                # Fallback: QPixmap direct load (rare)
+                pix = QPixmap(self.path)
+                if not pix.isNull():
+                    pix = pix.scaled(self.size, self.size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # Emit result (main thread will store in cache)
+            if pix and not pix.isNull():
+                self.signals.finished.emit(self.path, pix)
+        except Exception as e:
+            logger.exception(f"ThumbnailWorker failed for {self.path}: {e}")
 
 class ImageGridItem(QFrame):
     def __init__(self, image_path, show_note, click_callback, parent=None):
@@ -58,21 +100,23 @@ class ImageGridItem(QFrame):
         self.setFrameShape(QFrame.StyledPanel)
         self.layout = QVBoxLayout(self)
         self.thumb = QLabel()
-        self.name = QLabel(image_path.split("/")[-1])
+        self.name = QLabel(os.path.basename(image_path))
         self.note = QLabel()
-        self.setup_ui(show_note)
-
-        self.mousePressEvent = lambda event: click_callback(self.image_path)
-
-    def setup_ui(self, show_note):
-        pixmap = QPixmap(self.image_path)
-        self.thumb.setPixmap(pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # placeholder pixmap to show immediately
+        placeholder = QPixmap(THUMB_SIZE, THUMB_SIZE)
+        placeholder.fill(Qt.lightGray)
+        self.thumb.setPixmap(placeholder)
         self.thumb.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(self.thumb)
         self.name.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(self.name)
+
         if show_note:
-            comment = read_comment(self.image_path)
+            # read_comment can be expensive; but leaving for now
+            try:
+                comment = read_comment(self.image_path)
+            except Exception:
+                comment = None
             self.note.setText(comment or "")
             self.note.setWordWrap(True)
             self.note.setAlignment(Qt.AlignCenter)
@@ -81,6 +125,14 @@ class ImageGridItem(QFrame):
         else:
             self.note.hide()
 
+        self.mousePressEvent = lambda event: click_callback(self.image_path)
+
+    def set_thumbnail(self, pixmap: QPixmap):
+        if pixmap and not pixmap.isNull():
+            # scale once more to ensure exact fit while keeping aspect
+            scaled = pixmap.scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.thumb.setPixmap(scaled)
+
     def refresh_note(self, show_note):
         if show_note:
             comment = read_comment(self.image_path)
@@ -88,7 +140,7 @@ class ImageGridItem(QFrame):
             self.note.setHidden(False)
         else:
             self.note.setHidden(True)
-     
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -162,6 +214,7 @@ class MainWindow(QMainWindow):
         # Signals
         self.comment_editor.comment_saved.connect(self.on_comment_saved)
 
+        # image state
         self.images = []
         self.filtered_images = []
         self.current_folder = None
@@ -170,7 +223,14 @@ class MainWindow(QMainWindow):
         self.loaded_count = 0
         self.preloaded_count = 0
         self.cols = 4
-        self.batch_size = 20 
+        self.batch_size = 20
+
+        # thumbnail cache + threadpool
+        self.thumb_cache = {}  # path -> QPixmap
+        self.pool = QThreadPool.globalInstance()
+        self.pool.setMaxThreadCount(max(2, os.cpu_count() or 2))
+        self.cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "photo_meta_thumbs")
+        pathlib.Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
 
         self.scroll.verticalScrollBar().valueChanged.connect(self.on_scroll)
         self.scroll.viewport().installEventFilter(self)
@@ -179,7 +239,7 @@ class MainWindow(QMainWindow):
     def on_open_clicked(self):
         if self.selected_image:
             open_in_explorer(self.selected_image)
-            
+
     def copy_filename_to_clipboard(self, event):
         if self.selected_image:
             QGuiApplication.clipboard().setText(self.selected_image)
@@ -187,10 +247,10 @@ class MainWindow(QMainWindow):
             self.filename_label.setStyleSheet(
                 "font-size: 14px; font-weight: bold; color: green;"
             )
-            QTimer.singleShot(400, lambda: 
+            QTimer.singleShot(400, lambda:
                 self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold;")
             )
-        
+
     def eventFilter(self, obj, event):
         logger.debug(f"eventFilter: obj={obj}, event={event.type()}")
 
@@ -217,7 +277,6 @@ class MainWindow(QMainWindow):
         visible_rows = max(1, (height // row_height) + 2)
         self.batch_size = self.cols * visible_rows
 
-
     def relayout_grid(self):
         for idx, path in enumerate(self.filtered_images[:self.loaded_count]):
             row, col = divmod(idx, self.cols)
@@ -233,6 +292,7 @@ class MainWindow(QMainWindow):
             self.images = scan_images(folder)
             self.loaded_count = 0
             self.preloaded_count = 0
+            # clear thumbnail cache for changed folder? We'll keep cache but it's keyed by full path.
             self.refresh_grid()
 
     def on_notes_toggle(self, state):
@@ -243,9 +303,13 @@ class MainWindow(QMainWindow):
         text = self.search_box.text().strip().lower()
         show_note = self.notes_toggle.isChecked()
         logger.debug(f"Refreshing grid. Search text: '{text}' show_note state: {show_note}")
+        # Filter images (note: read_comment may be slow for many images; consider moving filtering to a background thread if that's an issue)
         self.filtered_images = []
         for path in self.images:
-            comment = read_comment(path)
+            try:
+                comment = read_comment(path)
+            except Exception:
+                comment = None
             if not text or (comment and text in comment.lower()):
                 self.filtered_images.append(path)
         # Properly delete widgets to prevent them from becoming windows
@@ -253,12 +317,68 @@ class MainWindow(QMainWindow):
             widget = self.grid_layout.itemAt(i).widget()
             if widget:
                 self.grid_layout.removeWidget(widget)
-                widget.deleteLater()  # <-- Only this, do NOT call setParent(None)
+                widget.deleteLater()
         self.grid_items.clear()
         self.loaded_count = 0
         self.preloaded_count = 0
         self.update_columns()
         self.load_more_images()
+
+    # helpers for disk cache naming & validation
+    def _cache_filename_for(self, path: str) -> str:
+        # Use a hash so long paths don't break filenames
+        key = hashlib.sha1(path.encode("utf-8")).hexdigest()
+        return os.path.join(self.cache_dir, f"{key}.png")
+
+    def _is_disk_cache_valid(self, path: str, cache_file: str) -> bool:
+        if not os.path.exists(cache_file):
+            return False
+        try:
+            src_mtime = int(os.path.getmtime(path))
+            cache_mtime = int(os.path.getmtime(cache_file))
+            # If cache older than source, invalid
+            return cache_mtime >= src_mtime
+        except Exception:
+            return False
+
+    def _load_from_disk_cache(self, path: str):
+        cache_file = self._cache_filename_for(path)
+        if self._is_disk_cache_valid(path, cache_file):
+            pix = QPixmap(cache_file)
+            if not pix.isNull():
+                return pix
+        return None
+
+    def _save_to_disk_cache(self, path: str, pixmap: QPixmap):
+        try:
+            cache_file = self._cache_filename_for(path)
+            # Save QPixmap -> QImage -> file
+            image = pixmap.toImage()
+            image.save(cache_file, "PNG")
+            # Update mtime to match source mtime for validation
+            try:
+                src_mtime = os.path.getmtime(path)
+                os.utime(cache_file, (src_mtime, src_mtime))
+            except Exception:
+                pass
+        except Exception:
+            logger.exception(f"Failed to save thumbnail cache for {path}")
+
+    def _on_thumbnail_ready(self, path: str, pixmap: QPixmap):
+        # Called in main thread via signal
+        if pixmap is None or pixmap.isNull():
+            return
+        # store in memory cache
+        self.thumb_cache[path] = pixmap
+        # save to disk cache (async worker created pixmap; saving maybe expensive but small PNGs)
+        try:
+            self._save_to_disk_cache(path, pixmap)
+        except Exception:
+            logger.exception("Disk cache save error")
+        # update widget if present
+        item = self.grid_items.get(path)
+        if item:
+            item.set_thumbnail(pixmap)
 
     def load_more_images(self, preload=False):
         logger.debug(f"Loading more images, preload={preload}")
@@ -269,9 +389,19 @@ class MainWindow(QMainWindow):
         if preload:
             start = self.preloaded_count
             end = min(start + batch_size, total)
+            # Preload thumbnails into cache without creating widgets
             for idx, path in enumerate(self.filtered_images[start:end], start=start):
-                if path not in self.grid_items:
-                    QPixmap(path).scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if path in self.thumb_cache:
+                    continue
+                # try disk cache first
+                pix = self._load_from_disk_cache(path)
+                if pix:
+                    self.thumb_cache[path] = pix
+                    continue
+                # schedule worker to create thumbnail
+                worker = ThumbnailWorker(path, THUMB_SIZE, disk_cache_path=self.cache_dir)
+                worker.signals.finished.connect(self._on_thumbnail_ready)
+                self.pool.start(worker)
             self.preloaded_count = end
             return
 
@@ -282,8 +412,26 @@ class MainWindow(QMainWindow):
             item = ImageGridItem(path, show_note, self.on_image_selected, parent=self.grid_widget)
             self.grid_layout.addWidget(item, row, col)
             self.grid_items[path] = item
+            # if in-memory cache, set immediately
+            pix = self.thumb_cache.get(path)
+            if pix:
+                item.set_thumbnail(pix)
+                continue
+            # try disk cache
+            pix = self._load_from_disk_cache(path)
+            if pix:
+                # store and apply
+                self.thumb_cache[path] = pix
+                item.set_thumbnail(pix)
+                continue
+            # schedule worker to create thumbnail
+            worker = ThumbnailWorker(path, THUMB_SIZE, disk_cache_path=self.cache_dir)
+            worker.signals.finished.connect(self._on_thumbnail_ready)
+            self.pool.start(worker)
+
         self.loaded_count = end
         if self.loaded_count < total:
+            # schedule background preload of next batch (non-blocking)
             QTimer.singleShot(0, lambda: self.load_more_images(preload=True))
 
     def on_scroll(self, value):
@@ -297,6 +445,8 @@ class MainWindow(QMainWindow):
         logger.debug(f"Image selected: {image_path}")
         self.selected_image = image_path
         self.filename_label.setText(os.path.basename(image_path))
+        # For preview (bigger), we will load synchronously but scaled to width to keep it snappy.
+        # If you find preview blocks, we can make this async too.
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
             self.preview_label.setText("Cannot load image")
@@ -312,4 +462,3 @@ class MainWindow(QMainWindow):
         item = self.grid_items.get(image_path)
         if item:
             item.refresh_note(show_note)
-

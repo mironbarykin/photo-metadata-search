@@ -1,4 +1,3 @@
-PySide6
-piexif
-pillow
-logging
+PySide6==6.7.2
+Pillow==10.3.0
+piexif==1.1.3
