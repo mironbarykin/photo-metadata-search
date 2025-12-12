@@ -4,10 +4,13 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QScrollArea, QGridLayout, QFrame
 )
 from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QGuiApplication
 from .comment_editor import CommentEditor
 from core.file_scanner import scan_images
 from core.metadata import read_comment
+import os
+import platform
+import subprocess
 
 ENABLE_UI_LOGGING = False
 
@@ -29,6 +32,24 @@ MAX_COLS = 6
 THUMB_SIZE = 128
 SPACING = 12
 
+def open_in_explorer(path):
+    """Open a file in Finder/Explorer/your file manager."""
+    system = platform.system()
+
+    if system == "Windows":
+        # Select the file in Explorer
+        subprocess.run(["explorer", "/select,", os.path.normpath(path)])
+    elif system == "Darwin":
+        # Reveal in Finder
+        subprocess.run(["open", "-R", path])
+    else:
+        # Linux (xdg-open just opens the file or folder)
+        folder = os.path.dirname(path)
+        subprocess.run(["xdg-open", folder])
+
+
+
+
 class ImageGridItem(QFrame):
     def __init__(self, image_path, show_note, click_callback, parent=None):
         super().__init__(parent)
@@ -40,6 +61,7 @@ class ImageGridItem(QFrame):
         self.name = QLabel(image_path.split("/")[-1])
         self.note = QLabel()
         self.setup_ui(show_note)
+
         self.mousePressEvent = lambda event: click_callback(self.image_path)
 
     def setup_ui(self, show_note):
@@ -66,6 +88,7 @@ class ImageGridItem(QFrame):
             self.note.setHidden(False)
         else:
             self.note.setHidden(True)
+     
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -116,10 +139,22 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(left_panel_container, 2)
 
         right_panel = QVBoxLayout()
+        self.filename_label = QLabel("")
+        self.filename_label.setAlignment(Qt.AlignCenter)
+        self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.filename_label.mousePressEvent = self.copy_filename_to_clipboard
+
+        right_panel.addWidget(self.filename_label)
+
         self.preview_label = QLabel("Select an image")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumHeight(300)
         right_panel.addWidget(self.preview_label)
+        self.open_btn = QPushButton("Open in File Explorer")
+        self.open_btn.setEnabled(False)
+        self.open_btn.clicked.connect(self.on_open_clicked)
+        right_panel.addWidget(self.open_btn)
         self.comment_editor = CommentEditor()
         right_panel.addWidget(self.comment_editor)
         self.layout.addLayout(right_panel, 1)
@@ -141,6 +176,21 @@ class MainWindow(QMainWindow):
         self.scroll.viewport().installEventFilter(self)
         self.resizeEvent = self.on_resize
 
+    def on_open_clicked(self):
+        if self.selected_image:
+            open_in_explorer(self.selected_image)
+            
+    def copy_filename_to_clipboard(self, event):
+        if self.selected_image:
+            QGuiApplication.clipboard().setText(self.selected_image)
+            # Optional: brief user feedback
+            self.filename_label.setStyleSheet(
+                "font-size: 14px; font-weight: bold; color: green;"
+            )
+            QTimer.singleShot(400, lambda: 
+                self.filename_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+            )
+        
     def eventFilter(self, obj, event):
         logger.debug(f"eventFilter: obj={obj}, event={event.type()}")
 
@@ -246,12 +296,14 @@ class MainWindow(QMainWindow):
     def on_image_selected(self, image_path):
         logger.debug(f"Image selected: {image_path}")
         self.selected_image = image_path
+        self.filename_label.setText(os.path.basename(image_path))
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
             self.preview_label.setText("Cannot load image")
             self.preview_label.setPixmap(QPixmap())
         else:
             self.preview_label.setPixmap(pixmap.scaledToWidth(400, Qt.SmoothTransformation))
+        self.open_btn.setEnabled(True)
         self.comment_editor.load_comment(image_path)
 
     def on_comment_saved(self, image_path, comment):
