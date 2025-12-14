@@ -16,11 +16,18 @@ class CommentEditor(QWidget):
         self.layout.addWidget(self.text_edit)
         self.layout.addWidget(self.save_btn)
         self.current_image = None
-
+        self._dirty = False
+        self.text_edit.textChanged.connect(self._on_text_changed)
+    
     def load_comment(self, image_path):
+        self.save_if_dirty()
+
         self.current_image = image_path
         comment = read_comment(image_path)
+        self.text_edit.blockSignals(True)
         self.text_edit.setPlainText(comment or "")
+        self.text_edit.blockSignals(False)
+        self._dirty = False
 
     def save_comment(self):
         if self.current_image:
@@ -31,6 +38,17 @@ class CommentEditor(QWidget):
 
     def _do_save(self, comment):
         write_comment(self.current_image, comment)
+        self._dirty = False
         self.save_btn.setEnabled(True)
         self.save_btn.setText("Save")
         self.comment_saved.emit(self.current_image, comment)
+        
+    def _on_text_changed(self):
+        self._dirty = True
+    
+    def save_if_dirty(self):
+        if self.current_image and self._dirty:
+            comment = self.text_edit.toPlainText()
+            write_comment(self.current_image, comment)
+            self._dirty = False
+            self.comment_saved.emit(self.current_image, comment)
