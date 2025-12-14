@@ -15,6 +15,8 @@ import platform
 import subprocess
 import hashlib
 import pathlib
+import html
+import re
 
 ENABLE_UI_LOGGING = False
 
@@ -35,6 +37,18 @@ MIN_COLS = 2
 MAX_COLS = 6
 THUMB_SIZE = 128
 SPACING = 12
+
+def highlight_text(text: str, query: str) -> str:
+    if not text or not query:
+        return html.escape(text or "")
+
+    escaped = html.escape(text)
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+
+    return pattern.sub(
+        lambda m: f"<span style='background-color: #ffe066;'>{m.group(0)}</span>",
+        escaped
+    )
 
 def open_in_explorer(path):
     """Open a file in Finder/Explorer/your file manager."""
@@ -93,7 +107,7 @@ class ThumbnailWorker(QRunnable):
             logger.exception(f"ThumbnailWorker failed for {self.path}: {e}")
 
 class ImageGridItem(QFrame):
-    def __init__(self, image_path, show_note, click_callback, parent=None):
+    def __init__(self, image_path, show_note, click_callback, search_text="", parent=None):
         super().__init__(parent)
         logger.debug(f"Creating ImageGridItem for {image_path}, show_note={show_note}")
         self.image_path = image_path
@@ -102,6 +116,7 @@ class ImageGridItem(QFrame):
         self.thumb = QLabel()
         self.name = QLabel(os.path.basename(image_path))
         self.note = QLabel()
+        self.note.setTextFormat(Qt.RichText)
         # placeholder pixmap to show immediately
         placeholder = QPixmap(THUMB_SIZE, THUMB_SIZE)
         placeholder.fill(Qt.lightGray)
@@ -117,7 +132,7 @@ class ImageGridItem(QFrame):
                 comment = read_comment(self.image_path)
             except Exception:
                 comment = None
-            self.note.setText(comment or "")
+            self.note.setText(highlight_text(comment or "", search_text))
             self.note.setWordWrap(True)
             self.note.setAlignment(Qt.AlignCenter)
             self.note.setStyleSheet("font-size: 11px; color: #555;")
@@ -133,10 +148,10 @@ class ImageGridItem(QFrame):
             scaled = pixmap.scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.thumb.setPixmap(scaled)
 
-    def refresh_note(self, show_note):
+    def refresh_note(self, show_note, search_text=""):
         if show_note:
             comment = read_comment(self.image_path)
-            self.note.setText(comment or "")
+            self.note.setText(highlight_text(comment or "", search_text))
             self.note.setHidden(False)
         else:
             self.note.setHidden(True)
@@ -383,6 +398,7 @@ class MainWindow(QMainWindow):
     def load_more_images(self, preload=False):
         logger.debug(f"Loading more images, preload={preload}")
         show_note = self.notes_toggle.isChecked()
+        search_text = self.search_box.text().strip()
         cols = self.cols
         total = len(self.filtered_images)
         batch_size = self.batch_size
@@ -409,7 +425,7 @@ class MainWindow(QMainWindow):
         end = min(start + batch_size, total)
         for idx, path in enumerate(self.filtered_images[start:end], start=start):
             row, col = divmod(idx, cols)
-            item = ImageGridItem(path, show_note, self.on_image_selected, parent=self.grid_widget)
+            item = ImageGridItem(path, show_note, self.on_image_selected, search_text=search_text, parent=self.grid_widget)
             self.grid_layout.addWidget(item, row, col)
             self.grid_items[path] = item
             # if in-memory cache, set immediately
@@ -459,6 +475,7 @@ class MainWindow(QMainWindow):
     def on_comment_saved(self, image_path, comment):
         logger.debug(f"Comment saved for {image_path}: {comment}")
         show_note = self.notes_toggle.isChecked()
+        search_text = self.search_box.text().strip()
         item = self.grid_items.get(image_path)
         if item:
-            item.refresh_note(show_note)
+                item.refresh_note(show_note, search_text)
